@@ -2,6 +2,9 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE KindSignatures #-}
 
 module Main where
 
@@ -9,6 +12,8 @@ import Control.Arrow ((&&&),(|||))
 import Control.Monad
 import Control.Concurrent.MVar
 import Control.DeepSeq
+import Data.Bifunctor
+import Numeric.Natural
 import System.Random.MWC
 
 main :: IO ()
@@ -316,3 +321,134 @@ mingleSort = fold (apo $ blend . fmap (id &&& out)) . downcast . unfold (fold di
 data Bush bush = Leaf K | Fork bush bush deriving (Show,Eq,Functor)
 
 data NonEmpty nonEmpty = Single K | Push K nonEmpty deriving (Show,Eq,Functor)
+
+data TernaryTree tt = TEmpty | TNode K tt tt tt deriving (Show,Eq,Functor)
+
+data ABTree a b = ABEmpty | ABNode K a b deriving (Show,Eq,Functor)
+
+data TABTree a b = TABEmpty | TABNode K a a a b deriving (Show,Eq,Functor)
+
+instance Bifunctor ABTree where
+  bimap f g ABEmpty        = ABEmpty
+  bimap f g (ABNode k a b) = ABNode k (f a) (g b)
+
+instance Bifunctor TABTree where
+  bimap f g TABEmpty               = TABEmpty
+  bimap f g (TABNode k a1 a2 a3 b) = TABNode k (f a1) (f a2) (f a3) (g b)
+
+fix :: (a -> a) -> a
+fix f = f $ fix f
+
+fix2 :: (a -> a) -> (a -> b -> b) -> b
+fix2 f g = fix $ g $ fix f
+
+type Mu2 f g = Mu (g (Mu f))
+type Nu2 f g = Nu (g (Nu f))
+
+h :: Natural -> Natural
+h n | n <= 0    = 1
+    | otherwise = 3 * h (pred n) + 1
+
+type MuShellTree' = Mu2 TernaryTree TABTree
+
+te :: Mu TernaryTree
+te = In_ TEmpty
+
+tn :: K -> Mu TernaryTree -> Mu TernaryTree -> Mu TernaryTree -> Mu TernaryTree
+tn k a b c = In_ $ TNode k a b c
+
+tabe :: Mu (TABTree a)
+tabe = In_ TABEmpty
+
+tabn :: K -> a -> a -> a -> Mu (TABTree a) -> Mu (TABTree a)
+tabn k a b c d = In_ $ TABNode k a b c d
+
+testST0' = tabn 0 te te te tabe
+testST1' = tabn 0 (tn 1 te te te) te te tabe
+testST4' = tabn 0 (tn 1 te te te) (tn 2 te te te) (tn 3 te te te) (tabn 4 te te te tabe)
+testST5' = tabn 0 (tn 1 (tn 5 te te te) te te)
+                  (tn 2 te te te) (tn 3 te te te) (tabn 4 te te te tabe)
+testST8' = tabn 0 (tn   1 (tn 5 te te te) te te)
+                  (tn   2 (tn 6 te te te) te te) 
+                  (tn   3 (tn 7 te te te) te te)
+                  (tabn 4 (tn 8 te te te) te te tabe)
+
+type MonoidalAlgebra f m = f m m -> m
+type ComonoidalCoalgebra f m = m -> f m m
+
+tt2List :: Algebra TernaryTree [K]
+tt2List TEmpty          = []
+tt2List (TNode k a b c) = k : (a <> b <> c)
+
+list2TT :: Coalgebra TernaryTree [K]
+list2TT [] = TEmpty
+list2TT (a:b:c:ls) = TNode a [b] [c] ls
+
+tabt2List :: MonoidalAlgebra TABTree [K]
+tabt2List TABEmpty            = []
+tabt2List (TABNode k a b c d) = k : (a <> b <> c <> d)
+
+something :: (Functor f, Bifunctor g)
+          => Algebra f a -> MonoidalAlgebra g a -> Mu2 f g -> a
+something f g = g . bimap (fold f) (something f g) . in_
+
+cosomething :: (Functor f, Bifunctor g)
+            => Coalgebra f a -> ComonoidalCoalgebra g a -> a -> Nu2 f g
+cosomething f g = Out . bimap (unfold f) (cosomething f g) . g
+
+infixr 0 :~>
+type f :~> g = forall a. f a -> g a
+
+class HFunctor hf where
+  hfmap :: (g :~> h) -> (hf g :~> hf h)
+
+type HAlgebra hf f = hf f :~> f
+
+newtype HMu hf a = In_H { in_H :: hf (HMu hf) a }
+
+hcata :: HFunctor hf => HAlgebra hf f -> HMu hf :~> f
+hcata f = f . hfmap (hcata f) . in_H
+
+type HCoalgebra hf f = f :~> hf f
+
+newtype HNu hf a = OutH { outH :: hf (HNu hf) a }
+
+hana :: HFunctor hf => HCoalgebra hf f -> f :~> HNu hf
+hana f = OutH . hfmap (hana f) . f
+
+data TFTree f a = TFEmpty | TFNode K a a a (f a) deriving (Functor)
+
+instance HFunctor TFTree where
+  hfmap f TFEmpty            = TFEmpty
+  hfmap f (TFNode k a b c d) = TFNode k a b c $ f d
+
+type MuShellTree = HMu TFTree (Mu TernaryTree)
+
+tfe :: HMu TFTree a
+tfe = In_H TFEmpty
+
+tfn :: K -> a -> a -> a -> HMu TFTree a -> HMu TFTree a
+tfn k a b c d = In_H $ TFNode k a b c d
+
+testMTS0, testMTS1, testMTS4, testMTS5, testMTS8 :: MuShellTree
+testMTS0 = tfn 0 te te te tfe
+testMTS1 = tfn 0 (tn 1 te te te) te te tfe
+testMTS4 = tfn 0 (tn 1 te te te) (tn 2 te te te) (tn 3 te te te) (tfn 4 te te te tfe)
+testMTS5 = tfn 0 (tn 1 (tn 5 te te te) te te)
+                 (tn 2 te te te) (tn 3 te te te) (tfn 4 te te te tfe)
+testMTS8 = tfn 0 (tn  1 (tn 5 te te te) te te)
+                 (tn  2 (tn 6 te te te) te te)
+                 (tn  3 (tn 7 te te te) te te)
+                 (tfn 4 (tn 8 te te te) te te tfe)
+
+nanika :: HAlgebra TFTree TernaryTree
+nanika TFEmpty            = TEmpty
+nanika (TFNode k a b c d) = TNode k a b c
+
+mkShellTree :: Mu List -> HNu TFTree (Nu TernaryTree)
+mkShellTree = para f
+  where
+  f :: List (Mu List, HNu TFTree (Nu TernaryTree)) -> HNu TFTree (Nu TernaryTree)
+  f Nil = OutH TFEmpty
+  f (Cons k (x, OutH TFEmpty)) = OutH $ TFNode k (Out TEmpty) (Out TEmpty) (Out TEmpty)
+                                                 (OutH TFEmpty)
